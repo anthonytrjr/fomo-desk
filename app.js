@@ -64,8 +64,7 @@
     if (!base || !flat) return urls;
     if (!/^https?:\/\//i.test(base)) return urls;
     var direct = base + "/" + flat;
-    var now = Date.now();
-    if (now >= skipDirectUntil) urls.push(direct);
+    var mirrors = [];
     try {
       var u = new URL(base);
       if (u.hostname === "gist.githubusercontent.com") {
@@ -73,12 +72,18 @@
         if (parts.length >= 2) {
           var user = parts[0];
           var id = parts[1];
-          urls.push("https://gistcdn.githack.com/" + user + "/" + id + "/raw/" + flat);
-          urls.push("https://cdn.statically.io/gist/" + user + "/" + id + "/raw/" + flat);
+          mirrors.push("https://gistcdn.githack.com/" + user + "/" + id + "/raw/" + flat);
+          mirrors.push("https://cdn.statically.io/gist/" + user + "/" + id + "/raw/" + flat);
         }
       }
     } catch (e) {}
-    if (now < skipDirectUntil) urls.push(direct);
+    var onPages = false;
+    try { onPages = /(?:^|\.)github\.io$/i.test(location.hostname); } catch (e2) {}
+    var now = Date.now();
+    var useDirectFirst = !onPages && now >= skipDirectUntil;
+    if (useDirectFirst) urls.push(direct);
+    mirrors.forEach(function (m) { urls.push(m); });
+    if (!useDirectFirst) urls.push(direct);
     return urls;
   }
 
