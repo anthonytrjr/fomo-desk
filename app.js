@@ -55,13 +55,58 @@
     return file;
   }
 
+  function gistIdFrom(d) {
+    if (!d) return "";
+    const m = String(d).match(/^[0-9a-f]{32}$/i);
+    if (m) return m[0];
+    try {
+      const u = new URL(d);
+      // raw base .../githubusercontent.com/{user}/{id}/raw
+      // or api.github.com/gists/{id}
+      const parts = u.pathname.split("/").filter(Boolean);
+      if (u.hostname === "api.github.com" && parts[0] === "gists" && parts[1]) return parts[1];
+      if (u.hostname === "gist.githubusercontent.com" && parts.length >= 2) return parts[1];
+      if (u.hostname === "gist.github.com" && parts.length >= 1) return parts[parts.length - 1];
+    } catch (e) {}
+    return "";
+  }
+
+  let gistFileUrls = null;
+
+  function refreshGistMap() {
+    const d = dataPath();
+    const id = gistIdFrom(d);
+    if (!id) {
+      gistFileUrls = null;
+      return Promise.resolve(false);
+    }
+    return fetch("https://api.github.com/gists/" + encodeURIComponent(id), {
+      cache: "no-store",
+      headers: { "Accept": "application/vnd.github+json" }
+    }).then(function (r) {
+      if (!r.ok) throw new Error("gist http " + r.status);
+      return r.json();
+    }).then(function (data) {
+      const map = {};
+      const files = (data && data.files) || {};
+      Object.keys(files).forEach(function (name) {
+        if (files[name] && files[name].raw_url) map[name] = files[name].raw_url;
+      });
+      gistFileUrls = map;
+      return true;
+    });
+  }
+
   function dataUrl(file) {
     const d = dataPath();
     if (!d) return null;
+    const flat = flattenGistName(file);
+    if (gistFileUrls && gistFileUrls[flat]) return withCacheBust(gistFileUrls[flat]);
     if (/^https?:\/\//i.test(d)) {
       const base = d.replace(/\/$/, "");
-      return withCacheBust(base + "/" + flattenGistName(file));
+      return withCacheBust(base + "/" + flat);
     }
+    if (gistIdFrom(d)) return null; // waiting for the map
     return "d/" + encodeURIComponent(d) + "/" + file;
   }
 
@@ -377,6 +422,10 @@
   }
 
   function poll() {
+    refreshGistMap().catch(function () {}).then(function () { pollReady(); });
+  }
+
+  function pollReady() {
     const stateUrl = dataUrl("state.json");
     if (!stateUrl) {
       showError();
