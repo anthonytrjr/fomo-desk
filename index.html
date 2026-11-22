@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0c0c0e">
+  <meta name="theme-color" content="#000000">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="FOMO Desk">
@@ -13,48 +13,135 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <header class="top">
-    <div class="brand">FOMO Desk</div>
-    <div class="mode" id="mode">PAPER</div>
-  </header>
+  <div id="error-bar" class="error-bar" hidden></div>
 
-  <section class="hero">
-    <div class="cash-label">Balance</div>
-    <div class="cash" id="cash">—</div>
-    <div class="today" id="today">today —</div>
-  </section>
+  <main id="screen-home" class="screen is-active" data-screen="home">
+    <header class="nav">
+      <button type="button" class="avatar" id="home-avatar" aria-label="Account"></button>
+      <div class="nav-title">Grok Bot <span class="chevron">›</span></div>
+      <button type="button" class="icon-btn" id="home-search" aria-label="Search">⌕</button>
+      <button type="button" class="icon-btn" id="home-bell" aria-label="Alerts"><span class="bell">⌾</span><span class="dot" id="bell-dot" hidden></span></button>
+    </header>
+    <section class="hero">
+      <div class="balance-row">
+        <div class="balance tabular" id="balance">—</div>
+        <span class="pill paper" id="paper-badge">PAPER</span>
+      </div>
+      <div class="hero-meta">
+        <span class="today tabular" id="today">—</span>
+        <span class="pill multiplier tabular" id="multiplier" hidden></span>
+      </div>
+    </section>
+    <div class="ranges" id="ranges" role="tablist">
+      <button type="button" data-range="LIVE" class="is-on">LIVE</button>
+      <button type="button" data-range="1H">1H</button>
+      <button type="button" data-range="4H">4H</button>
+      <button type="button" data-range="1D">1D</button>
+      <button type="button" data-range="1W">1W</button>
+      <button type="button" data-range="ALL">ALL</button>
+    </div>
+    <section class="chart-wrap">
+      <canvas id="chart" width="390" height="180" aria-label="Balance chart"></canvas>
+    </section>
+    <section class="live-screen card" id="live-screen-card">
+      <div class="live-frame" id="live-frame">
+        <img id="live-img" alt="Live screen" hidden>
+        <div class="live-placeholder" id="live-placeholder">Waiting for a frame</div>
+        <div class="live-tl" id="live-age"><span class="led grey"></span> Last frame —</div>
+        <div class="live-tr" id="live-owner">Idle</div>
+      </div>
+      <div class="live-last" id="live-last">No order yet</div>
+    </section>
+    <section class="block">
+      <h2>Bots · <span id="bots-running">0 running</span></h2>
+      <div class="carousel" id="bot-carousel"></div>
+    </section>
+    <section class="block">
+      <div class="row-head">
+        <h2>Activity</h2>
+        <button type="button" class="text-link" id="activity-see-all">See all</button>
+      </div>
+      <ul class="rows" id="home-activity"></ul>
+    </section>
+  </main>
 
-  <nav class="bots" id="bots" aria-label="Bots">
-    <article class="bot" data-bot="scanner"><span class="dot" style="background:#64d2ff"></span>Scanner<span class="state">idle</span></article>
-    <article class="bot" data-bot="analyst"><span class="dot" style="background:#ffd60a"></span>Analyst<span class="state">idle</span></article>
-    <article class="bot" data-bot="brain"><span class="dot" style="background:#bf5af2"></span>Brain<span class="state">idle</span></article>
-    <article class="bot" data-bot="executor"><span class="dot" style="background:#00d35a"></span>Executor<span class="state">idle</span></article>
-    <article class="bot" data-bot="risk"><span class="dot" style="background:#ff6b9a"></span>Risk<span class="state">idle</span></article>
+  <main id="screen-bots" class="screen" data-screen="bots" hidden>
+    <header class="nav"><div class="nav-title">Bots</div></header>
+    <div id="bots-full"></div>
+  </main>
+
+  <main id="screen-activity" class="screen" data-screen="activity" hidden>
+    <header class="nav"><div class="nav-title">Activity</div></header>
+    <ul class="rows" id="activity-list"></ul>
+    <p class="empty" id="activity-empty" hidden>Nothing yet tonight</p>
+  </main>
+
+  <main id="screen-account" class="screen" data-screen="account" hidden>
+    <header class="nav"><div class="nav-title">Account</div></header>
+    <section class="card account-mode">
+      <div class="seg" id="mode-seg">
+        <button type="button" data-mode="PAPER" class="is-on">PAPER</button>
+        <button type="button" data-mode="LIVE">LIVE</button>
+      </div>
+      <div class="cash-line">Cash <span class="tabular" id="account-cash">—</span></div>
+    </section>
+    <section class="card links-card">
+      <a class="row-link" id="profile-link" href="#" hidden>Your FOMO profile</a>
+      <button type="button" class="row-link" id="invite-btn">Invite a friend</button>
+      <p class="copied" id="invite-copied" hidden>Link copied</p>
+    </section>
+    <section class="card" id="settings-groups"></section>
+    <section class="card">
+      <div class="row-line">Pushes <span id="push-state">Plan B: Telegram only</span></div>
+      <button type="button" class="row-link" id="test-push" disabled>Send test push</button>
+    </section>
+  </main>
+
+  <main id="screen-audit" class="screen" data-screen="audit" hidden>
+    <header class="nav">
+      <button type="button" class="back" data-back>‹</button>
+      <div class="nav-title">Audit</div>
+    </header>
+    <div id="audit-body"></div>
+  </main>
+
+  <main id="screen-coin" class="screen" data-screen="coin" hidden>
+    <header class="nav">
+      <button type="button" class="back" data-back>‹</button>
+      <div class="nav-title" id="coin-title">Coin</div>
+      <span class="pill paper" id="coin-paper">PAPER</span>
+    </header>
+    <div id="coin-body"></div>
+  </main>
+
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-card">
+      <h3 id="sheet-title">Sell now</h3>
+      <div class="seg" id="sell-pcts">
+        <button type="button" data-pct="25">25%</button>
+        <button type="button" data-pct="50">50%</button>
+        <button type="button" data-pct="100" class="is-on">100%</button>
+      </div>
+      <button type="button" class="primary" id="confirm-sell">Confirm sell</button>
+      <button type="button" class="ghost" id="sheet-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <div id="search-overlay" class="overlay" hidden>
+    <div class="search-box">
+      <input id="search-input" type="search" placeholder="Name, symbol or mint" enterkeyhint="search">
+      <button type="button" id="search-close">Cancel</button>
+    </div>
+    <ul class="rows" id="search-results"></ul>
+  </div>
+
+  <nav class="tabbar" aria-label="Tabs">
+    <button type="button" class="tab is-on" data-tab="home">Home</button>
+    <button type="button" class="tab" data-tab="bots">Bots</button>
+    <button type="button" class="tab" data-tab="activity">Activity</button>
+    <button type="button" class="tab" data-tab="account">Account</button>
   </nav>
 
-  <section class="card">
-    <h2>Live</h2>
-    <canvas id="chart" width="640" height="240" aria-label="Price chart"></canvas>
-  </section>
-
-  <section class="card">
-    <h2>Screen</h2>
-    <div class="screen" id="screen">Live screen will appear here (STEP 9).</div>
-  </section>
-
-  <section class="card">
-    <h2>Activity</h2>
-    <ul class="activity" id="activity">
-      <li class="empty">No activity yet. The desk is being built.</li>
-    </ul>
-  </section>
-
-  <section class="card">
-    <h2>Positions</h2>
-    <p class="empty" id="positions">No open positions.</p>
-  </section>
-
-  <p class="hint" id="hint">Add this page to your iPhone home screen (Safari → Share → Add to Home Screen).</p>
   <script src="chart.js"></script>
   <script src="app.js"></script>
 </body>

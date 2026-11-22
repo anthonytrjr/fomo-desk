@@ -1,5 +1,6 @@
-/* Cache the app shell only. Never cache API or /d/ live data. */
-const SHELL = "desk-shell-v2";
+/* Cache the app shell only. Never cache API, /d/ data, or cross-origin
+   (gist) fetches, and never store tokens. */
+const SHELL = "desk-shell-v3";
 const ASSETS = ["./", "index.html", "app.css", "app.js", "chart.js", "manifest.json", "icons/icon-192.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", function (event) {
@@ -18,6 +19,7 @@ self.addEventListener("activate", function (event) {
 
 self.addEventListener("fetch", function (event) {
   const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
   if (/\/d(\/|$)/.test(url.pathname) || /\/api(\/|$)/.test(url.pathname)) {
     return; // network only; do not cache live data
   }
