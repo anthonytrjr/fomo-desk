@@ -14,6 +14,9 @@
     settings: null,
     screen: "home",
     range: "LIVE",
+    trades: [],
+    tradeFilterMode: "all",
+    tradeFilterState: "all",
     lastOk: 0,
     retryIn: 15,
     sellMint: null,
@@ -421,6 +424,121 @@
     });
   }
 
+
+  function fmtTs(ts) {
+    if (ts == null || ts === "") return "—";
+    const n = Number(ts);
+    const d = new Date(n > 1e12 ? n : n * 1000);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+  function fmtHold(s) {
+    if (s == null) return "";
+    s = Math.max(0, Math.round(Number(s)));
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60), rem = s % 60;
+    if (m < 60) return rem ? (m + "m " + rem + "s") : (m + "m");
+    const h = Math.floor(m / 60), mm = m % 60;
+    return mm ? (h + "h " + mm + "m") : (h + "h");
+  }
+  function fmtPnl(usd, pct) {
+    if (usd == null || usd === "") return "";
+    const n = Number(usd);
+    const sign = n >= 0 ? "+" : "-";
+    let s = sign + "$" + Math.abs(n).toFixed(2);
+    if (pct != null && pct !== "") {
+      const p = Number(pct);
+      const ps = (p >= 0 ? "+" : "") + p.toFixed(0) + "%";
+      s += " (" + ps + ")";
+    }
+    return s;
+  }
+  function tradeRow(row, compact) {
+    const li = document.createElement("li");
+    const main = document.createElement("div");
+    main.className = "row-main";
+    const title = document.createElement("div");
+    title.className = "row-title";
+    const badge = document.createElement("span");
+    const mode = (row.mode || "PAPER").toUpperCase();
+    badge.className = "badge " + (mode === "REAL" ? "real" : "paper");
+    badge.textContent = mode === "REAL" ? "REAL" : "PAPER";
+    title.appendChild(badge);
+    title.appendChild(document.createTextNode((row.symbol || row.mint || "coin") + " "));
+    const st = document.createElement("span");
+    st.className = "state";
+    st.textContent = row.state === "open" ? "open" : "closed";
+    title.appendChild(st);
+    const sub = document.createElement("div");
+    sub.className = "row-sub";
+    const bits = [];
+    bits.push("buy " + fmtTs(row.buy_at) + (row.buy_price != null ? " @" + Number(row.buy_price).toPrecision(4) : ""));
+    if (row.state === "closed") {
+      bits.push("sell " + fmtTs(row.sell_at) + (row.sell_price != null ? " @" + Number(row.sell_price).toPrecision(4) : ""));
+    }
+    const held = fmtHold(row.hold_s);
+    if (held) bits.push("held " + held);
+    if (row.exit_reason) bits.push(row.exit_reason);
+    sub.textContent = bits.join(" · ");
+    main.appendChild(title);
+    main.appendChild(sub);
+    const right = document.createElement("div");
+    right.className = "row-right tabular trade-pnl";
+    const pnl = fmtPnl(row.pnl_usd, row.pnl_pct);
+    right.textContent = row.state === "open" ? (row.size_usd != null ? "$" + Number(row.size_usd).toFixed(2) : "open") : (pnl || "—");
+    if (row.state === "closed" && row.pnl_usd != null) {
+      right.classList.add(Number(row.pnl_usd) >= 0 ? "up" : "down");
+    }
+    li.appendChild(main);
+    li.appendChild(right);
+    li.addEventListener("click", function () {
+      if (row.mint) openCoin(row.mint, row.coin_url || row.link);
+    });
+    return li;
+  }
+  function filteredTrades() {
+    return (state.trades || []).filter(function (row) {
+      if (state.tradeFilterMode !== "all" && (row.mode || "PAPER").toUpperCase() !== state.tradeFilterMode) return false;
+      if (state.tradeFilterState !== "all" && (row.state || "") !== state.tradeFilterState) return false;
+      return true;
+    });
+  }
+  function renderTrades() {
+    const rows = filteredTrades();
+    const home = $("home-trades");
+    if (home) {
+      home.innerHTML = "";
+      const slice = rows.slice(0, 5);
+      if (!slice.length) {
+        const li = document.createElement("li");
+        li.className = "empty";
+        li.textContent = "Waiting for the first trade";
+        home.appendChild(li);
+      } else {
+        slice.forEach(function (row) { home.appendChild(tradeRow(row, true)); });
+      }
+    }
+    const list = $("trades-list");
+    const empty = $("trades-empty");
+    if (list) {
+      list.innerHTML = "";
+      if (!rows.length) {
+        if (empty) { empty.hidden = false; empty.textContent = "No trades match these filters"; }
+      } else {
+        if (empty) empty.hidden = true;
+        rows.forEach(function (row) { list.appendChild(tradeRow(row, false)); });
+      }
+    }
+  }
+  function applyTrades(payload) {
+    const rows = (payload && (payload.rows || payload.items || payload.trades)) || [];
+    // newest first (builder already sorts, but be safe)
+    state.trades = rows.slice().sort(function (a, b) {
+      return (Number(b.sell_at || b.buy_at || 0) - Number(a.sell_at || a.buy_at || 0));
+    });
+    renderTrades();
+  }
+
   function poll() {
     pollReady();
   }
@@ -437,6 +555,8 @@
 
     const actUrl = dataUrl("activity.json");
     if (actUrl) fetchJson(actUrl).then(applyActivity).catch(function () {});
+    const tradesUrl = dataUrl("trades.json");
+    if (tradesUrl) fetchJson(tradesUrl).then(applyTrades).catch(function () {});
 
     const chartUrl = dataUrl("chart.json");
     if (chartUrl) fetchJson(chartUrl).then(applyChart).catch(function () {});
@@ -560,7 +680,23 @@
     btn.addEventListener("click", function () { showScreen("home"); });
   });
   $("home-avatar") && $("home-avatar").addEventListener("click", function () { showScreen("account"); });
-  $("activity-see-all") && $("activity-see-all").addEventListener("click", function () { showScreen("activity"); });
+  $("trades-see-all") && $("trades-see-all").addEventListener("click", function () { showScreen("trades"); });
+  const filters = $("trade-filters");
+  if (filters) {
+    filters.addEventListener("click", function (e) {
+      const btn = e.target.closest("button.chip");
+      if (!btn) return;
+      if (btn.dataset.filterMode) {
+        state.tradeFilterMode = btn.dataset.filterMode;
+        filters.querySelectorAll("[data-filter-mode]").forEach(function (b) { b.classList.toggle("is-on", b === btn); });
+      }
+      if (btn.dataset.filterState) {
+        state.tradeFilterState = btn.dataset.filterState;
+        filters.querySelectorAll("[data-filter-state]").forEach(function (b) { b.classList.toggle("is-on", b === btn); });
+      }
+      renderTrades();
+    });
+  }
   $("ranges") && $("ranges").addEventListener("click", function (e) {
     const btn = e.target.closest("button[data-range]");
     if (!btn) return;

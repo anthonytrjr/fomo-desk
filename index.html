@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="FOMO Desk">
   <title>FOMO Desk</title>
-  <link rel="manifest" href="manifest.json?v=6">
+  <link rel="manifest" href="manifest.json?v=7">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="app.css?v=6">
+  <link rel="stylesheet" href="app.css?v=7">
 </head>
 <body>
   <div id="error-bar" class="error-bar" hidden></div>
@@ -58,10 +58,10 @@
     </section>
     <section class="block">
       <div class="row-head">
-        <h2>Activity</h2>
-        <button type="button" class="text-link" id="activity-see-all">See all</button>
+        <h2>Trades</h2>
+        <button type="button" class="text-link" id="trades-see-all">See all</button>
       </div>
-      <ul class="rows" id="home-activity"></ul>
+      <ul class="rows" id="home-trades"></ul>
     </section>
   </main>
 
@@ -70,10 +70,18 @@
     <div id="bots-full"></div>
   </main>
 
-  <main id="screen-activity" class="screen" data-screen="activity" hidden>
-    <header class="nav"><div class="nav-title">Activity</div></header>
-    <ul class="rows" id="activity-list"></ul>
-    <p class="empty" id="activity-empty" hidden>Nothing yet tonight</p>
+  <main id="screen-trades" class="screen" data-screen="trades" hidden>
+    <header class="nav"><div class="nav-title">Trades</div></header>
+    <div class="filters" id="trade-filters">
+      <button type="button" class="chip is-on" data-filter-mode="all">All modes</button>
+      <button type="button" class="chip" data-filter-mode="PAPER">PAPER</button>
+      <button type="button" class="chip" data-filter-mode="REAL">REAL</button>
+      <button type="button" class="chip is-on" data-filter-state="all">All</button>
+      <button type="button" class="chip" data-filter-state="open">Open</button>
+      <button type="button" class="chip" data-filter-state="closed">Closed</button>
+    </div>
+    <ul class="rows" id="trades-list"></ul>
+    <p class="empty" id="trades-empty" hidden>No trades yet</p>
   </main>
 
   <main id="screen-account" class="screen" data-screen="account" hidden>
@@ -138,11 +146,11 @@
   <nav class="tabbar" aria-label="Tabs">
     <button type="button" class="tab is-on" data-tab="home">Home</button>
     <button type="button" class="tab" data-tab="bots">Bots</button>
-    <button type="button" class="tab" data-tab="activity">Activity</button>
+    <button type="button" class="tab" data-tab="trades">Trades</button>
     <button type="button" class="tab" data-tab="account">Account</button>
   </nav>
 
-  <script src="chart.js?v=6"></script>
-  <script src="app.js?v=6"></script>
+  <script src="chart.js?v=7"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
