@@ -1,5 +1,7 @@
-/* Plan B shell: open once as {URL}#d={DATA_PATH} (and optional #t=). Keep secrets
-   in localStorage only. Never log them or put them back in the address bar.
+/* Plan B shell: open once as {URL}#d={DATA_PATH} (and optional #t=). Keep the
+   #d= and #t= fragment in the address bar so Add to Home Screen (Safari or
+   Chrome on iOS 16.4+) saves the full link. The fragment is never sent to a
+   server. Also persist to localStorage as a fallback. Never log the values.
    FOMO links come from the JSON the process writes (links.py); this file never
    builds those URLs. */
 (function () {
@@ -29,9 +31,7 @@
     if (parts.t) localStorage.setItem("desk_app_token", parts.t);
     if (parts.d) localStorage.setItem("desk_data_path", parts.d);
   } catch (e) {}
-  if (parts.t || parts.d) {
-    history.replaceState(null, "", location.pathname + location.search);
-  }
+  // Keep the fragment in the address bar. Do not history.replaceState it away.
 
   function dataPath() {
     try { return localStorage.getItem("desk_data_path") || ""; } catch (e) { return ""; }
