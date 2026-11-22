@@ -1,0 +1,64 @@
+:root {
+  --bg: #0c0c0e;
+  --card: #161618;
+  --text: #f5f5f7;
+  --muted: #8e8e93;
+  --line: #2c2c2e;
+  --paper: #00d35a;
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+body {
+  padding: calc(16px + var(--safe-top)) 16px calc(28px + var(--safe-bottom));
+  max-width: 640px;
+  margin: 0 auto;
+}
+.top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.brand { font-weight: 650; letter-spacing: 0.02em; }
+.mode {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--paper);
+  border: 1px solid var(--paper);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.hero { margin-bottom: 20px; }
+.cash-label, .today, .empty, .hint, .state { color: var(--muted); }
+.cash-label { font-size: 13px; }
+.cash { font-size: 40px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+.today { font-size: 14px; margin-top: 4px; }
+.bots { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 16px; }
+.bot {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card); border-radius: 12px; padding: 12px 14px;
+}
+.bot .dot { width: 8px; height: 8px; border-radius: 50%; }
+.bot .state { margin-left: auto; font-size: 12px; }
+.card {
+  background: var(--card);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+canvas { width: 100%; height: auto; display: block; }
+.screen {
+  aspect-ratio: 16 / 10;
+  border-radius: 10px;
+  background: #111;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; text-align: center; padding: 12px;
+}
+.activity { list-style: none; margin: 0; padding: 0; }
+.hint { font-size: 12px; text-align: center; margin-top: 20px; }
