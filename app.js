@@ -1,254 +1,428 @@
-/* Plan B shell: open once as {URL}#d={DATA_PATH} (and optional #t=). Keep the
-   #d= and #t= fragment in the address bar so Add to Home Screen (Safari or
-   Chrome on iOS 16.4+) saves the full link. The fragment is never sent to a
-   server. Also persist to localStorage as a fallback. Never log the values.
-   FOMO links come from the JSON the process writes (links.py); this file never
-   builds those URLs. */
 (function () {
-  const POLL_MS = 15000;
-  const $ = function (id) { return document.getElementById(id); };
-  const state = {
-    data: null,
-    activity: null,
-    chart: null,
-    settings: null,
-    screen: "home",
-    range: "LIVE",
-    trades: [],
-    tradeFilterMode: "all",
-    tradeFilterState: "all",
-    lastOk: 0,
-    retryIn: 15,
-    sellMint: null,
-    sellPct: 100,
-    prevBalance: null,
-  };
+  "use strict";
 
-  const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";
-  const parts = {};
-  hash.split("&").forEach(function (pair) {
-    const i = pair.indexOf("=");
-    if (i > 0) parts[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1));
-  });
-  try {
-    if (parts.t) localStorage.setItem("desk_app_token", parts.t);
-    if (parts.d) localStorage.setItem("desk_data_path", parts.d);
-  } catch (e) {}
-  // Keep the fragment in the address bar. Do not history.replaceState it away.
+  var POLL_MS = 8000;
+  var CACHE = "desk_data_path";
+  var TOKEN_CACHE = "desk_token";
+  var state = { data: null, trades: [], activity: [], lastOk: 0, startedLabel: "" };
+  var sellPct = 100;
+  var sellMint = null;
+  var tradeFilter = "all";
+  var tickTimer = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function hashParts() {
+    var raw = (location.hash || "").replace(/^#/, "");
+    var out = {};
+    raw.split("&").forEach(function (pair) {
+      if (!pair) return;
+      var i = pair.indexOf("=");
+      if (i < 0) out[decodeURIComponent(pair)] = "";
+      else out[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1));
+    });
+    return out;
+  }
 
   function dataPath() {
-    try { return localStorage.getItem("desk_data_path") || ""; } catch (e) { return ""; }
-  }
-  function appToken() {
-    try { return localStorage.getItem("desk_app_token") || ""; } catch (e) { return ""; }
-  }
-  function withCacheBust(url) {
+    var fromHash = hashParts().d || "";
     try {
-      const u = new URL(url, location.href);
-      u.searchParams.set("_t", String(Date.now()));
-      return u.toString();
+      if (fromHash) localStorage.setItem(CACHE, fromHash);
+      return fromHash || localStorage.getItem(CACHE) || "";
     } catch (e) {
-      return url;
+      return fromHash || "";
     }
   }
 
-  function flattenGistName(file) {
-    if (file === "screen.jpg") return "screen.json";
-    if (file.indexOf("coin/") === 0 && /\.json$/.test(file)) return "coin-" + file.slice(5);
-    return file;
+  function token() {
+    var fromHash = hashParts().t || "";
+    try {
+      if (fromHash) localStorage.setItem(TOKEN_CACHE, fromHash);
+      return fromHash || localStorage.getItem(TOKEN_CACHE) || "";
+    } catch (e) {
+      return fromHash || "";
+    }
   }
 
-  function gistIdFrom(d) {
-    if (!d) return "";
-    const m = String(d).match(/^[0-9a-f]{32}$/i);
-    if (m) return m[0];
-    try {
-      const u = new URL(d);
-      // raw base .../githubusercontent.com/{user}/{id}/raw
-      // or api.github.com/gists/{id}
-      const parts = u.pathname.split("/").filter(Boolean);
-      if (u.hostname === "api.github.com" && parts[0] === "gists" && parts[1]) return parts[1];
-      if (u.hostname === "gist.githubusercontent.com" && parts.length >= 2) return parts[1];
-      if (u.hostname === "gist.github.com" && parts.length >= 1) return parts[parts.length - 1];
-    } catch (e) {}
+  function dataUrl(file) {
+    var base = (dataPath() || "").replace(/\/+$/, "");
+    if (!base) return "";
+    var flat = String(file || "").replace(/^\/+/, "");
+    if (/^https?:\/\//i.test(base)) return base + "/" + flat;
     return "";
   }
 
-  let gistFileUrls = null;
+  function safeReason(err, status) {
+    if (status) return "Could not load desk data (HTTP " + status + ").";
+    var name = (err && err.name) || "";
+    if (name === "TypeError") return "Could not reach the desk data host (network or CORS).";
+    if (name === "AbortError") return "Desk data request timed out.";
+    return "Could not load desk data.";
+  }
 
-  function refreshGistMap() {
-    const d = dataPath();
-    const id = gistIdFrom(d);
-    if (!id) {
-      gistFileUrls = null;
-      return Promise.resolve(false);
-    }
-    return fetch("https://api.github.com/gists/" + encodeURIComponent(id), {
-      cache: "no-store",
-      headers: { "Accept": "application/vnd.github+json" }
-    }).then(function (r) {
-      if (!r.ok) throw new Error("gist http " + r.status);
-      return r.json();
-    }).then(function (data) {
-      const map = {};
-      const files = (data && data.files) || {};
-      Object.keys(files).forEach(function (name) {
-        if (files[name] && files[name].raw_url) map[name] = files[name].raw_url;
+  function showError(msg) {
+    var el = $("error-bar");
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = msg;
+  }
+
+  function hideError() {
+    var el = $("error-bar");
+    if (!el) return;
+    el.hidden = true;
+    el.textContent = "";
+  }
+
+  function money(n) {
+    if (n == null || n === "") return "—";
+    var v = Number(n);
+    if (!isFinite(v)) return "—";
+    var sign = v < 0 ? "-" : "";
+    return sign + "$" + Math.abs(v).toFixed(2);
+  }
+
+  function pct(n, signed) {
+    if (n == null || n === "") return "—";
+    var v = Number(n);
+    if (!isFinite(v)) return "—";
+    var sign = signed && v > 0 ? "+" : "";
+    return sign + v.toFixed(2) + "%";
+  }
+
+  function ago(ts, now) {
+    if (!ts) return "";
+    var sec = Math.max(0, Math.round(((now || Date.now()) / 1000) - Number(ts)));
+    if (sec < 5) return "just now";
+    if (sec < 60) return sec + "s ago";
+    var m = Math.floor(sec / 60);
+    if (m < 60) return m + "m ago";
+    var h = Math.floor(m / 60);
+    if (h < 48) return h + "h ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  function clock(ts) {
+    if (!ts) return "—";
+    try {
+      return new Date(Number(ts) * 1000).toLocaleTimeString("en-US", {
+        timeZone: "America/Los_Angeles",
+        hour: "numeric",
+        minute: "2-digit"
       });
-      gistFileUrls = map;
+    } catch (e) {
+      return "—";
+    }
+  }
+
+  function hold(s) {
+    if (s == null || s === "") return "";
+    var n = Number(s);
+    if (!isFinite(n) || n < 0) return "";
+    if (n < 60) return Math.round(n) + "s";
+    var m = Math.floor(n / 60);
+    var r = Math.round(n % 60);
+    if (m < 60) return m + "m" + (r ? " " + r + "s" : "");
+    return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  }
+
+  function pnlClass(n) {
+    if (n == null || !isFinite(Number(n))) return "pnl";
+    return "pnl " + (Number(n) < 0 ? "down" : "up");
+  }
+
+  function isPlanB() {
+    var s = state.data || {};
+    return (s.plan || "B") === "B";
+  }
+
+  function canSellRemote() {
+    return !isPlanB() && !!token() && location.protocol !== "file:";
+  }
+
+  function closeSheet() {
+    var el = $("sheet");
+    if (!el) return;
+    el.hidden = true;
+    el.classList.remove("is-open");
+    sellMint = null;
+  }
+
+  function openSell(pos) {
+    var el = $("sheet");
+    if (!el || !pos) return;
+    sellMint = pos.mint || pos.id || null;
+    sellPct = 100;
+    $("sheet-title").textContent = "Sell now";
+    $("sheet-coin").textContent = (pos.symbol || pos.name || "Coin") + (pos.size_usd != null ? " · " + money(pos.size_usd) : "");
+    var actions = $("sheet-actions");
+    var note = $("sheet-note");
+    if (canSellRemote()) {
+      if (actions) actions.hidden = false;
+      if (note) note.hidden = true;
+      document.querySelectorAll(".pcts button").forEach(function (b) {
+        b.classList.toggle("is-on", b.getAttribute("data-pct") === "100");
+      });
+    } else {
+      if (actions) actions.hidden = true;
+      if (note) {
+        note.hidden = false;
+        note.textContent = "PAPER desk is read-only on this phone. Use Telegram or the desk to sell.";
+      }
+    }
+    el.hidden = false;
+    el.classList.add("is-open");
+  }
+
+  function bindSheet() {
+    var el = $("sheet");
+    if (!el) return;
+    closeSheet();
+    $("cancel-sell").addEventListener("click", function (e) {
+      e.preventDefault();
+      closeSheet();
+    });
+    el.querySelectorAll("[data-close-sheet]").forEach(function (n) {
+      n.addEventListener("click", function () { closeSheet(); });
+    });
+    document.querySelectorAll(".pcts button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        sellPct = Number(b.getAttribute("data-pct")) || 100;
+        document.querySelectorAll(".pcts button").forEach(function (x) { x.classList.remove("is-on"); });
+        b.classList.add("is-on");
+      });
+    });
+    $("confirm-sell").addEventListener("click", confirmSell);
+    var startY = 0;
+    var card = el.querySelector(".sheet-card");
+    if (!card) return;
+    card.addEventListener("touchstart", function (e) {
+      startY = e.changedTouches[0].clientY;
+    }, { passive: true });
+    card.addEventListener("touchend", function (e) {
+      var dy = e.changedTouches[0].clientY - startY;
+      if (dy > 60) closeSheet();
+    }, { passive: true });
+  }
+
+  function confirmSell() {
+    if (!sellMint || !canSellRemote()) {
+      closeSheet();
+      return;
+    }
+    fetch("/api/sell/" + encodeURIComponent(sellMint), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token() },
+      body: JSON.stringify({ pct: sellPct, paper: true })
+    }).catch(function () {}).then(function () {
+      closeSheet();
+      poll();
+    });
+  }
+
+  function showScreen(name) {
+    document.querySelectorAll(".screen").forEach(function (s) {
+      s.hidden = s.id !== "screen-" + name;
+    });
+    document.querySelectorAll(".tabs [data-go]").forEach(function (b) {
+      b.classList.toggle("is-on", b.getAttribute("data-go") === name);
+    });
+  }
+
+  function applyBadge(mode) {
+    var el = $("mode-badge");
+    var m = String(mode || "PAPER").toUpperCase() === "REAL" ? "REAL" : "PAPER";
+    el.textContent = m;
+    el.className = "mode-badge " + (m === "REAL" ? "real" : "paper");
+    setText("account-mode", m);
+  }
+
+  function freshestHeartbeat(bots) {
+    var best = 0;
+    (bots || []).forEach(function (b) {
+      var h = Number(b.heartbeat || 0);
+      if (h > best) best = h;
+    });
+    return best;
+  }
+
+  function applyStatus(s) {
+    var el = $("bot-status");
+    var stopped = (s.trading || "on") === "stopped";
+    var hb = freshestHeartbeat(s.bots);
+    var age = hb ? ago(hb) : "";
+    if (stopped) {
+      el.textContent = "Stopped" + (age ? " · last beat " + age : "");
+      el.className = "bot-status stopped";
+    } else {
+      el.textContent = "Trading on" + (age ? " · heartbeat " + age : "");
+      el.className = "bot-status";
+    }
+    setText("account-trading", stopped ? "Stopped" : "Trading on");
+    if (s.started_at) {
+      state.startedLabel = "Desk scanning since " + clock(s.started_at) + " PT";
+    }
+  }
+
+  function refreshUpdated() {
+    var el = $("updated");
+    if (!el) return;
+    if (!state.lastOk) {
+      el.textContent = dataPath() ? "Loading…" : "Not connected";
+      return;
+    }
+    var sec = Math.max(0, Math.round((Date.now() - state.lastOk) / 1000));
+    el.textContent = sec <= 1 ? "Updated just now" : "Updated " + sec + "s ago";
+  }
+
+  function setText(id, text) {
+    var el = $(id);
+    if (el) el.textContent = text;
+  }
+
+  function renderPositions(rows) {
+    var list = $("pos-list");
+    var empty = $("pos-empty");
+    list.innerHTML = "";
+    rows = rows || [];
+    empty.hidden = rows.length > 0;
+    if (!rows.length) {
+      empty.textContent = "No open positions.";
+      return;
+    }
+    rows.forEach(function (p) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "pos";
+      var chg = p.since_entry_pct;
+      btn.innerHTML =
+        "<div><div class=\"sym\">" + esc(p.symbol || p.name || "Coin") + "</div>" +
+        "<div class=\"meta\">" + esc(money(p.size_usd)) + (p.entry_price != null ? " @ " + Number(p.entry_price).toPrecision(4) : "") + "</div></div>" +
+        "<div class=\"" + pnlClass(chg) + "\">" + esc(pct(chg, true)) + "</div>";
+      btn.addEventListener("click", function () { openSell(p); });
+      list.appendChild(btn);
+    });
+  }
+
+  function tradeHtml(row) {
+    var mode = String(row.mode || row.badge || "PAPER").toUpperCase();
+    var open = String(row.state || "").toLowerCase() === "open" || !row.sell_ts;
+    var pnl = row.pnl;
+    var pnlPct = row.pnl_pct;
+    var holdStr = hold(row.hold_s);
+    var bits = [];
+    bits.push(open ? "Open" : "Closed");
+    if (row.buy_ts) bits.push("bought " + clock(row.buy_ts));
+    if (!open && row.sell_ts) bits.push("sold " + clock(row.sell_ts));
+    if (holdStr) bits.push("held " + holdStr);
+    if (row.exit_reason) bits.push(String(row.exit_reason));
+    var prices = [];
+    if (row.buy_price != null) prices.push("in " + Number(row.buy_price).toPrecision(4));
+    if (row.sell_price != null) prices.push("out " + Number(row.sell_price).toPrecision(4));
+    var pnlLine = "";
+    if (!open && (pnl != null || pnlPct != null)) {
+      pnlLine = "<div class=\"" + pnlClass(pnl != null ? pnl : pnlPct) + "\">" +
+        esc(pnl != null ? money(pnl) : "") +
+        (pnlPct != null ? " (" + esc(pct(pnlPct, true)) + ")" : "") +
+        "</div>";
+    }
+    return (
+      "<div><div><span class=\"pill " + (open ? "open" : "") + "\">" + esc(mode) + "</span> " +
+      "<span class=\"sym\">" + esc(row.symbol || row.name || "Coin") + "</span></div>" +
+      "<div class=\"meta\">" + esc(bits.join(" · ")) + (prices.length ? "<br>" + esc(prices.join(" · ")) : "") + "</div></div>" +
+      pnlLine
+    );
+  }
+
+  function filterTrades(rows) {
+    return (rows || []).filter(function (r) {
+      var mode = String(r.mode || r.badge || "PAPER").toUpperCase();
+      var open = String(r.state || "").toLowerCase() === "open" || !r.sell_ts;
+      if (tradeFilter === "open") return open;
+      if (tradeFilter === "closed") return !open;
+      if (tradeFilter === "PAPER" || tradeFilter === "REAL") return mode === tradeFilter;
       return true;
     });
   }
 
-  function dataUrl(file) {
-    const d = dataPath();
-    if (!d) return null;
-    const flat = flattenGistName(file);
-    if (gistFileUrls && gistFileUrls[flat]) return withCacheBust(gistFileUrls[flat]);
-    if (/^https?:\/\//i.test(d)) {
-      const base = d.replace(/\/$/, "");
-      return withCacheBust(base + "/" + flat);
-    }
-    if (gistIdFrom(d)) return null; // waiting for the map
-    return "d/" + encodeURIComponent(d) + "/" + file;
-  }
-
-  function showScreen(name) {
-    state.screen = name;
-    document.querySelectorAll("main.screen").forEach(function (el) {
-      const on = el.dataset.screen === name;
-      el.hidden = !on;
-      el.classList.toggle("is-active", on);
-    });
-    document.querySelectorAll(".tabbar .tab").forEach(function (el) {
-      el.classList.toggle("is-on", el.dataset.tab === name);
-    });
-  }
-
-  function money(n) {
-    if (n == null || isNaN(n)) return "—";
-    const sign = n < 0 ? "-" : "";
-    return sign + "$" + Math.abs(n).toFixed(2);
-  }
-  function pct(n, plus) {
-    if (n == null || isNaN(n)) return "—";
-    const body = (plus && n > 0 ? "+" : "") + n.toFixed(2) + "%";
-    return body;
-  }
-
-  function setText(el, v) { if (el) el.textContent = v; }
-
-  function applyPaperBadge(mode) {
-    const show = (mode || "PAPER") === "PAPER";
-    ["paper-badge", "coin-paper"].forEach(function (id) {
-      const el = $(id);
-      if (el) el.hidden = !show;
-    });
-  }
-
-  function botColor(name) {
-    return ({ scanner: "#64d2ff", analyst: "#ffd60a", brain: "#bf5af2", executor: "#00d35a", risk: "#ff6b9a" })[name] || "#fff";
-  }
-
-  function renderBotsCarousel(bots) {
-    const root = $("bot-carousel");
-    if (!root) return;
-    root.innerHTML = "";
-    (bots || []).forEach(function (b) {
-      const el = document.createElement("article");
-      el.className = "bot-card";
-      el.innerHTML = '<div class="name"></div><div class="detail"></div>';
-      el.querySelector(".name").style.color = botColor(b.name);
-      el.querySelector(".name").textContent = (b.name || "").replace(/^./, function (c) { return c.toUpperCase(); });
-      el.querySelector(".detail").textContent = (b.state || "idle") + " · " + (b.count || 0);
-      root.appendChild(el);
-    });
-    const running = (bots || []).filter(function (b) { return b.state === "running" && !b.paused; }).length;
-    setText($("bots-running"), running + " running");
-  }
-
-  function renderBotsFull(bots) {
-    const root = $("bots-full");
-    if (!root) return;
-    root.innerHTML = "";
-    (bots || []).forEach(function (b) {
-      const wrap = document.createElement("section");
-      wrap.className = "bot-full";
-      const locked = b.name === "risk" && (state.data && (state.data.positions || []).length);
-      wrap.innerHTML =
-        '<div class="top"><span class="status-dot"></span><strong></strong>' +
-        '<span class="count tabular"></span><input type="checkbox" class="switch"></div>' +
-        '<div class="decisions"></div>';
-      wrap.querySelector("strong").textContent = (b.name || "").replace(/^./, function (c) { return c.toUpperCase(); });
-      wrap.querySelector("strong").style.color = botColor(b.name);
-      wrap.querySelector(".count").textContent = (b.count || 0) + " today";
-      const dot = wrap.querySelector(".status-dot");
-      dot.classList.toggle("paused", !!b.paused);
-      dot.classList.toggle("idle", b.state === "idle" && !b.paused);
-      const sw = wrap.querySelector(".switch");
-      sw.checked = !b.paused;
-      sw.disabled = !!locked;
-      sw.addEventListener("change", function () {
-        /* Plan B: pause goes through Telegram. Reflect locally only if /api is reachable. */
-        postApi("/api/bots/" + b.name + "/" + (sw.checked ? "resume" : "pause")).catch(function () {
-          sw.checked = !sw.checked;
-        });
+  function renderTrades() {
+    var rows = filterTrades(state.trades);
+    var home = $("home-trades");
+    var homeEmpty = $("home-trades-empty");
+    var list = $("trades-list");
+    var empty = $("trades-empty");
+    var emptyMsg = state.trades.length ? "No trades match this filter." : ("No trades yet." + (state.startedLabel ? " " + state.startedLabel : ""));
+    function fill(target, emptyEl, slice) {
+      target.innerHTML = "";
+      emptyEl.hidden = slice.length > 0;
+      emptyEl.textContent = emptyMsg;
+      slice.forEach(function (row) {
+        var el = document.createElement(row.coin_url ? "a" : "div");
+        el.className = "trade";
+        if (row.coin_url) {
+          el.href = row.coin_url;
+          el.target = "_blank";
+          el.rel = "noopener";
+        }
+        el.innerHTML = tradeHtml(row);
+        target.appendChild(el);
       });
-      root.appendChild(wrap);
-    });
-  }
-
-  function activityRow(row, compact) {
-    const li = document.createElement("li");
-    const main = document.createElement("div");
-    main.className = "row-main";
-    const title = document.createElement("div");
-    title.className = "row-title";
-    title.textContent = row.title || row.kind || "";
-    const sub = document.createElement("div");
-    sub.className = "row-sub";
-    sub.textContent = row.subtitle || row.bot || "";
-    main.appendChild(title);
-    main.appendChild(sub);
-    const right = document.createElement("div");
-    right.className = "row-right tabular";
-    right.textContent = row.value || "";
-    li.appendChild(main);
-    li.appendChild(right);
-    li.addEventListener("click", function () {
-      if ((row.kind || "") === "rejected") openAudit(row.mint);
-      else if (row.mint) openCoin(row.mint, row.link);
-    });
-    if (!compact && row.link) {
-      const open = document.createElement("a");
-      open.className = "text-link";
-      open.textContent = "Open on FOMO";
-      open.href = row.link;
-      open.target = "_blank";
-      open.rel = "noopener";
-      open.addEventListener("click", function (e) { e.stopPropagation(); });
-      li.appendChild(open);
     }
-    return li;
+    fill(home, homeEmpty, (state.trades || []).slice(0, 5));
+    fill(list, empty, rows);
   }
 
-  function renderActivity(rows, into, emptyEl, limit) {
-    const list = $(into);
-    if (!list) return;
+  function activityText(row) {
+    var kind = String(row.kind || row.type || row.bot || "").toLowerCase();
+    var coin = row.symbol || row.mint || "";
+    var reason = row.reason || row.detail || row.msg || row.text || "";
+    if (row.summary) return row.summary;
+    if (kind.indexOf("scan") >= 0) return "Scanning" + (reason ? " · " + reason : "");
+    if (kind.indexOf("vet") >= 0 || kind.indexOf("analyst") >= 0 || kind.indexOf("score") >= 0) {
+      return "Vetting" + (coin ? " " + coin : "") + (reason ? " · " + reason : "");
+    }
+    if (kind.indexOf("buy") >= 0 || kind === "bought") return "Bought " + (coin || "coin") + (reason ? " · " + reason : "");
+    if (kind.indexOf("sell") >= 0 || kind === "sold" || kind === "closed") return "Sold " + (coin || "coin") + (reason ? " · " + reason : "");
+    return (row.bot ? row.bot + " · " : "") + (reason || kind || "Update");
+  }
+
+  function renderActivity(rows) {
+    var list = $("home-activity");
+    var empty = $("home-activity-empty");
     list.innerHTML = "";
-    const slice = (rows || []).slice(0, limit || rows.length);
-    if (!slice.length) {
-      if (emptyEl) { $(emptyEl).hidden = false; $(emptyEl).textContent = "Nothing yet tonight"; }
-      if (into === "home-activity") {
-        const li = document.createElement("li");
-        li.className = "empty";
-        li.textContent = "Waiting for the first trade";
-        list.appendChild(li);
-      }
+    rows = (rows || []).slice(0, 8);
+    empty.hidden = rows.length > 0;
+    if (!rows.length) {
+      empty.textContent = "No activity yet." + (state.startedLabel ? " " + state.startedLabel : "");
       return;
     }
-    if (emptyEl) $(emptyEl).hidden = true;
-    slice.forEach(function (row) { list.appendChild(activityRow(row, into === "home-activity")); });
+    rows.forEach(function (row) {
+      var el = document.createElement("div");
+      el.className = "act";
+      el.innerHTML = "<div><div>" + esc(activityText(row)) + "</div><div class=\"meta\">" +
+        esc((row.bot ? row.bot + " · " : "") + (row.ts ? ago(row.ts) : "")) + "</div></div>";
+      list.appendChild(el);
+    });
+  }
+
+  function renderBots(bots) {
+    var list = $("bots-list");
+    list.innerHTML = "";
+    (bots || []).forEach(function (b) {
+      var el = document.createElement("div");
+      el.className = "bot";
+      var paused = b.paused || b.state === "stopped";
+      el.innerHTML = "<div><div class=\"sym\">" + esc(b.name || "bot") + "</div>" +
+        "<div class=\"meta\">" + esc((paused ? "paused" : (b.state || "running")) +
+        (b.heartbeat ? " · beat " + ago(b.heartbeat) : "") +
+        (b.count != null ? " · " + b.count + " today" : "")) + "</div></div>";
+      list.appendChild(el);
+    });
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
   function applyState(s) {
@@ -256,481 +430,120 @@
     state.data = s;
     state.lastOk = Date.now();
     hideError();
-    applyPaperBadge(s.mode);
-    const bal = s.balance;
-    setText($("balance"), money(bal));
-    const today = s.today_pct;
-    const todayEl = $("today");
-    if (todayEl) {
-      todayEl.textContent = pct(today, true) + " today";
-      todayEl.style.color = today == null ? "" : (today < 0 ? "var(--red)" : "var(--green)");
+    applyBadge(s.mode);
+    applyStatus(s);
+    setText("balance", money(s.balance));
+    var today = $("today");
+    if (today) {
+      var v = s.today_pct;
+      today.textContent = (v == null ? "Today —" : pct(v, true) + " today");
+      today.className = "today" + (v == null ? "" : (Number(v) < 0 ? " down" : " up"));
     }
-    const m = $("multiplier");
-    if (m) {
-      if (s.multiplier != null) {
-        m.hidden = false;
-        m.textContent = Number(s.multiplier).toFixed(2) + "×";
-      } else m.hidden = true;
-    }
-    setText($("account-cash"), money(s.balance));
-    renderBotsCarousel(s.bots);
-    renderBotsFull(s.bots);
-    const last = s.last_order;
-    if (last) {
-      const checks = last.checks || {};
-      const bits = ["screen", "api", "chain"].map(function (k) {
-        const v = checks[k];
-        if (v === "n/a") return "chain n/a";
-        return (v ? "✓ " : "· ") + k;
-      }).join(" · ");
-      setText($("live-last"), (last.reason || last.side || "Order") + " · " + bits);
-    } else {
-      setText($("live-last"), "No order yet");
-    }
-    const owner = $("live-owner");
-    if (owner) owner.textContent = "Idle";
-    document.querySelectorAll("#mode-seg button").forEach(function (btn) {
-      btn.classList.toggle("is-on", btn.dataset.mode === (s.mode || "PAPER"));
-    });
-  }
-
-  function applyActivity(a) {
-    const rows = (a && a.rows) || a || [];
-    state.activity = rows;
-    renderActivity(rows, "home-activity", null, 5);
-    renderActivity(rows, "activity-list", "activity-empty");
-  }
-
-  function applyChart(c) {
-    state.chart = c;
-    if (window.DeskChart) window.DeskChart.draw($("chart"), c || { points: [], marks: [] });
+    setText("account-cash", money(s.balance));
+    renderPositions(s.positions || []);
+    renderBots(s.bots || []);
+    refreshUpdated();
+    var prof = $("profile-link");
+    // profile comes from account.json separately
   }
 
   function applyAccount(acc) {
     if (!acc) return;
-    const a = $("profile-link");
+    var a = $("profile-link");
     if (a && acc.profile_url) {
       a.hidden = false;
       a.href = acc.profile_url;
-      a.target = "_blank";
-      a.rel = "noopener";
     }
-    const btn = $("invite-btn");
+    var btn = $("invite-btn");
     if (btn && acc.invite_url) {
       btn.onclick = function () {
-        const url = acc.invite_url;
-        if (navigator.share) {
-          navigator.share({ title: "FOMO", url: url }).catch(function () { copy(url); });
-        } else copy(url);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(acc.invite_url).catch(function () {});
+        }
+        btn.textContent = "Invite link copied";
+        setTimeout(function () { btn.textContent = "Copy invite link"; }, 1600);
       };
     }
-    setText($("push-state"), acc.plan_b_note || acc.pushes || "Plan B: Telegram only");
   }
 
-  function copy(text) {
-    function ok() {
-      const el = $("invite-copied");
-      if (el) { el.hidden = false; setTimeout(function () { el.hidden = true; }, 1600); }
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(ok).catch(ok);
-    } else ok();
-  }
-
-  function showError() {
-    const el = $("error-bar");
-    if (!el) return;
-    el.hidden = false;
-    const last = state.lastOk ? new Date(state.lastOk).toLocaleTimeString() : "never";
-    el.textContent = "Desk offline · retrying in " + state.retryIn + "s · last update " + last;
-  }
-  function hideError() {
-    const el = $("error-bar");
-    if (el) el.hidden = true;
-  }
-
-  function fetchJson(url) {
-    return fetch(url, { cache: "no-store" }).then(function (r) {
-      if (!r.ok) throw new Error("http " + r.status);
-      return r.json();
-    });
-  }
-
-  function postApi(path, body) {
-    const t = appToken();
-    if (!t) return Promise.reject(new Error("no api"));
-    return fetch(path, {
-      method: "POST",
+  function fetchJson(file) {
+    var url = dataUrl(file);
+    if (!url) return Promise.resolve(null);
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 8000) : null;
+    var bust = url + (url.indexOf("?") >= 0 ? "&" : "?") + "_t=" + Date.now();
+    return fetch(bust, {
       cache: "no-store",
-      headers: { "Authorization": "Bearer " + t, "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : "{}",
-    }).then(function (r) {
-      if (!r.ok) throw new Error("http " + r.status);
-      return r.json();
-    });
-  }
-
-
-  function renderSettings(payload) {
-    const root = $("settings-groups");
-    if (!root || !payload || !payload.settings) return;
-    state.settings = payload;
-    const groups = { scanner: "Scanner", analyst: "Analyst", social: "Social", brain: "Brain", executor: "Executor", risk: "Risk", desk: "Desk", copy_picks: "Copy picks" };
-    const by = {};
-    Object.keys(payload.settings).forEach(function (key) {
-      const g = key.split(".")[0];
-      (by[g] = by[g] || []).push(key);
-    });
-    root.innerHTML = "";
-    Object.keys(groups).forEach(function (g) {
-      const keys = by[g];
-      if (!keys) return;
-      const h = document.createElement("h2");
-      h.textContent = groups[g];
-      h.style.margin = "8px 0";
-      root.appendChild(h);
-      keys.forEach(function (key) {
-        const val = payload.settings[key];
-        const range = (payload.ranges || {})[key];
-        const row = document.createElement("div");
-        row.className = "setting";
-        const lab = document.createElement("label");
-        lab.textContent = key;
-        row.appendChild(lab);
-        if (range && typeof val === "number") {
-          const meta = document.createElement("div");
-          meta.className = "meta";
-          meta.textContent = range.min + " – " + range.max;
-          row.appendChild(meta);
-          const sl = document.createElement("input");
-          sl.type = "range"; sl.min = range.min; sl.max = range.max; sl.step = "any"; sl.value = val;
-          const num = document.createElement("input");
-          num.type = "number"; num.min = range.min; num.max = range.max; num.value = val;
-          function send(v) {
-            postApi("/api/settings", { [key]: v }).catch(function () {});
-          }
-          sl.addEventListener("change", function () { num.value = sl.value; send(+sl.value); });
-          num.addEventListener("change", function () { sl.value = num.value; send(+num.value); });
-          row.appendChild(sl); row.appendChild(num);
-        } else {
-          const num = document.createElement("input");
-          num.type = typeof val === "number" ? "number" : "text";
-          num.value = val == null ? "" : String(val);
-          num.addEventListener("change", function () { postApi("/api/settings", { [key]: num.value }).catch(function () {}); });
-          row.appendChild(num);
-        }
-        root.appendChild(row);
-      });
-    });
-  }
-
-
-  function fmtTs(ts) {
-    if (ts == null || ts === "") return "—";
-    const n = Number(ts);
-    const d = new Date(n > 1e12 ? n : n * 1000);
-    if (Number.isNaN(d.getTime())) return "—";
-    return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  }
-  function fmtHold(s) {
-    if (s == null) return "";
-    s = Math.max(0, Math.round(Number(s)));
-    if (s < 60) return s + "s";
-    const m = Math.floor(s / 60), rem = s % 60;
-    if (m < 60) return rem ? (m + "m " + rem + "s") : (m + "m");
-    const h = Math.floor(m / 60), mm = m % 60;
-    return mm ? (h + "h " + mm + "m") : (h + "h");
-  }
-  function fmtPnl(usd, pct) {
-    if (usd == null || usd === "") return "";
-    const n = Number(usd);
-    const sign = n >= 0 ? "+" : "-";
-    let s = sign + "$" + Math.abs(n).toFixed(2);
-    if (pct != null && pct !== "") {
-      const p = Number(pct);
-      const ps = (p >= 0 ? "+" : "") + p.toFixed(0) + "%";
-      s += " (" + ps + ")";
-    }
-    return s;
-  }
-  function tradeRow(row, compact) {
-    const li = document.createElement("li");
-    const main = document.createElement("div");
-    main.className = "row-main";
-    const title = document.createElement("div");
-    title.className = "row-title";
-    const badge = document.createElement("span");
-    const mode = (row.mode || "PAPER").toUpperCase();
-    badge.className = "badge " + (mode === "REAL" ? "real" : "paper");
-    badge.textContent = mode === "REAL" ? "REAL" : "PAPER";
-    title.appendChild(badge);
-    title.appendChild(document.createTextNode((row.symbol || row.mint || "coin") + " "));
-    const st = document.createElement("span");
-    st.className = "state";
-    st.textContent = row.state === "open" ? "open" : "closed";
-    title.appendChild(st);
-    const sub = document.createElement("div");
-    sub.className = "row-sub";
-    const bits = [];
-    bits.push("buy " + fmtTs(row.buy_at) + (row.buy_price != null ? " @" + Number(row.buy_price).toPrecision(4) : ""));
-    if (row.state === "closed") {
-      bits.push("sell " + fmtTs(row.sell_at) + (row.sell_price != null ? " @" + Number(row.sell_price).toPrecision(4) : ""));
-    }
-    const held = fmtHold(row.hold_s);
-    if (held) bits.push("held " + held);
-    if (row.exit_reason) bits.push(row.exit_reason);
-    sub.textContent = bits.join(" · ");
-    main.appendChild(title);
-    main.appendChild(sub);
-    const right = document.createElement("div");
-    right.className = "row-right tabular trade-pnl";
-    const pnl = fmtPnl(row.pnl_usd, row.pnl_pct);
-    right.textContent = row.state === "open" ? (row.size_usd != null ? "$" + Number(row.size_usd).toFixed(2) : "open") : (pnl || "—");
-    if (row.state === "closed" && row.pnl_usd != null) {
-      right.classList.add(Number(row.pnl_usd) >= 0 ? "up" : "down");
-    }
-    li.appendChild(main);
-    li.appendChild(right);
-    li.addEventListener("click", function () {
-      if (row.mint) openCoin(row.mint, row.coin_url || row.link);
-    });
-    return li;
-  }
-  function filteredTrades() {
-    return (state.trades || []).filter(function (row) {
-      if (state.tradeFilterMode !== "all" && (row.mode || "PAPER").toUpperCase() !== state.tradeFilterMode) return false;
-      if (state.tradeFilterState !== "all" && (row.state || "") !== state.tradeFilterState) return false;
-      return true;
-    });
-  }
-  function renderTrades() {
-    const rows = filteredTrades();
-    const home = $("home-trades");
-    if (home) {
-      home.innerHTML = "";
-      const slice = rows.slice(0, 5);
-      if (!slice.length) {
-        const li = document.createElement("li");
-        li.className = "empty";
-        li.textContent = "Waiting for the first trade";
-        home.appendChild(li);
-      } else {
-        slice.forEach(function (row) { home.appendChild(tradeRow(row, true)); });
+      signal: ctrl ? ctrl.signal : undefined,
+      headers: { "Accept": "application/json" }
+    }).then(function (res) {
+      if (!res.ok) {
+        var err = new Error("http");
+        err.status = res.status;
+        throw err;
       }
-    }
-    const list = $("trades-list");
-    const empty = $("trades-empty");
-    if (list) {
-      list.innerHTML = "";
-      if (!rows.length) {
-        if (empty) { empty.hidden = false; empty.textContent = "No trades match these filters"; }
-      } else {
-        if (empty) empty.hidden = true;
-        rows.forEach(function (row) { list.appendChild(tradeRow(row, false)); });
-      }
-    }
-  }
-  function applyTrades(payload) {
-    const rows = (payload && (payload.rows || payload.items || payload.trades)) || [];
-    // newest first (builder already sorts, but be safe)
-    state.trades = rows.slice().sort(function (a, b) {
-      return (Number(b.sell_at || b.buy_at || 0) - Number(a.sell_at || a.buy_at || 0));
+      return res.json();
+    }).finally(function () {
+      if (timer) clearTimeout(timer);
     });
-    renderTrades();
   }
 
   function poll() {
-    pollReady();
-  }
-
-  function pollReady() {
-    const stateUrl = dataUrl("state.json");
-    if (!stateUrl) {
-      showError();
+    if (!dataPath()) {
+      showError("This app is missing its desk link. Open it once from the original #d= link, then add it to the Home Screen again.");
+      refreshUpdated();
       return;
     }
-    fetchJson(stateUrl).then(function (s) {
+    return Promise.all([
+      fetchJson("state.json"),
+      fetchJson("trades.json"),
+      fetchJson("activity.json"),
+      fetchJson("account.json")
+    ]).then(function (parts) {
+      var s = parts[0], t = parts[1], a = parts[2], acc = parts[3];
+      if (!s) throw new Error("empty");
       applyState(s);
-    }).catch(function () { showError(); });
+      state.trades = (t && t.rows) || t || [];
+      renderTrades();
+      state.activity = (a && a.rows) || a || [];
+      renderActivity(state.activity);
+      applyAccount(acc);
+    }).catch(function (err) {
+      showError(safeReason(err, err && err.status));
+      refreshUpdated();
+    });
+  }
 
-    const actUrl = dataUrl("activity.json");
-    if (actUrl) fetchJson(actUrl).then(applyActivity).catch(function () {});
-    const tradesUrl = dataUrl("trades.json");
-    if (tradesUrl) fetchJson(tradesUrl).then(applyTrades).catch(function () {});
-
-    const chartUrl = dataUrl("chart.json");
-    if (chartUrl) fetchJson(chartUrl).then(applyChart).catch(function () {});
-
-    /* account/settings are optional extras when the process writes them */
-    const accUrl = dataUrl("account.json");
-    if (accUrl) fetchJson(accUrl).then(applyAccount).catch(function () {});
-    const setUrl = dataUrl("settings.json");
-    if (setUrl) fetchJson(setUrl).then(renderSettings).catch(function () {});
-
-    const img = $("live-img");
-    const ph = $("live-placeholder");
-    const screenUrl = dataUrl("screen.jpg");
-    if (screenUrl && img) {
-      const applyBlob = function (blob) {
-        const src = URL.createObjectURL(blob);
-        const next = new Image();
-        next.onload = function () {
-          if (img.dataset.blob) {
-            try { URL.revokeObjectURL(img.dataset.blob); } catch (e) {}
-          }
-          img.dataset.blob = src;
-          img.src = src;
-          img.hidden = false;
-          if (ph) ph.hidden = true;
-          const age = $("live-age");
-          if (age) age.innerHTML = '<span class="led red"></span> Live · Bot\'s computer';
-        };
-        next.onerror = function () { try { URL.revokeObjectURL(src); } catch (e) {} };
-        next.src = src;
-      };
-      // Plan B gist: screen.json {mime,b64}. Local /d/: screen.jpg also works.
-      fetch(screenUrl, { cache: "no-store" }).then(function (r) {
-        if (!r.ok) throw new Error("no screen");
-        const ct = (r.headers.get("content-type") || "").toLowerCase();
-        if (ct.indexOf("json") !== -1 || /screen\.json(\?|$)/.test(screenUrl)) {
-          return r.json().then(function (doc) {
-            if (!doc || !doc.b64) throw new Error("no b64");
-            const bin = atob(doc.b64);
-            const arr = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-            applyBlob(new Blob([arr], { type: doc.mime || "image/jpeg" }));
-          });
-        }
-        return r.blob().then(applyBlob);
-      }).catch(function () { /* keep last frame */ });
+  function dropServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.getRegistrations().then(function (regs) {
+      regs.forEach(function (r) { r.unregister(); });
+    }).catch(function () {});
+    if (window.caches) {
+      caches.keys().then(function (keys) {
+        keys.forEach(function (k) { caches.delete(k); });
+      }).catch(function () {});
     }
   }
 
-  function openCoin(mint, link) {
-    showScreen("coin");
-    const body = $("coin-body");
-    body.innerHTML = '<div class="skel" style="height:120px;margin:16px"></div>';
-    const url = dataUrl("coin/" + encodeURIComponent(mint) + ".json");
-    const render = function (c) {
-      const coin = (c && c.coin) || {};
-      const pos = (c && c.position) || {};
-      setText($("coin-title"), coin.symbol || coin.name || "Coin");
-      const href = (c && c.link) || link || pos.link;
-      body.innerHTML = "";
-      const price = document.createElement("div");
-      price.className = "coin-price tabular";
-      price.textContent = c && c.price != null ? String(c.price) : "—";
-      body.appendChild(price);
-      const meta = document.createElement("p");
-      meta.className = "empty";
-      meta.style.textAlign = "left";
-      meta.textContent = (coin.symbol || "") + (pos.since_entry_pct != null ? "  " + pct(pos.since_entry_pct, true) + " since entry" : "");
-      body.appendChild(meta);
-      const actions = document.createElement("div");
-      actions.className = "coin-actions";
-      if (href) {
-        const a = document.createElement("a");
-        a.className = "secondary";
-        a.style.textAlign = "center";
-        a.style.lineHeight = "50px";
-        a.style.textDecoration = "none";
-        a.textContent = "Open on FOMO";
-        a.href = href;
-        a.target = "_blank";
-        a.rel = "noopener";
-        actions.appendChild(a);
-      }
-      const sell = document.createElement("button");
-      sell.type = "button";
-      sell.className = "primary danger";
-      sell.textContent = "Sell now";
-      sell.addEventListener("click", function () { openSell(mint); });
-      actions.appendChild(sell);
-      body.appendChild(actions);
-    };
-    if (url) fetchJson(url).then(render).catch(function () { render({ mint: mint, link: link }); });
-    else render({ mint: mint, link: link });
-  }
-
-  function openAudit(mint) {
-    showScreen("audit");
-    const body = $("audit-body");
-    body.textContent = "No audit yet.";
-  }
-
-  function openSell(mint) {
-    state.sellMint = mint;
-    state.sellPct = 100;
-    $("sheet").hidden = false;
-  }
-
-  function confirmSell() {
-    const mint = state.sellMint;
-    $("sheet").hidden = true;
-    postApi("/api/sell/" + encodeURIComponent(mint), { pct: state.sellPct, confirm: true })
-      .catch(function () {
-        /* Plan B: sell also goes through Telegram when /api is not on this host. */
-      });
-  }
-
-  document.querySelectorAll(".tabbar .tab").forEach(function (btn) {
-    btn.addEventListener("click", function () { showScreen(btn.dataset.tab); });
+  document.querySelectorAll("[data-go]").forEach(function (b) {
+    b.addEventListener("click", function () { showScreen(b.getAttribute("data-go")); });
   });
-  document.querySelectorAll("[data-back]").forEach(function (btn) {
-    btn.addEventListener("click", function () { showScreen("home"); });
-  });
-  $("home-avatar") && $("home-avatar").addEventListener("click", function () { showScreen("account"); });
-  $("trades-see-all") && $("trades-see-all").addEventListener("click", function () { showScreen("trades"); });
-  const filters = $("trade-filters");
-  if (filters) {
-    filters.addEventListener("click", function (e) {
-      const btn = e.target.closest("button.chip");
-      if (!btn) return;
-      if (btn.dataset.filterMode) {
-        state.tradeFilterMode = btn.dataset.filterMode;
-        filters.querySelectorAll("[data-filter-mode]").forEach(function (b) { b.classList.toggle("is-on", b === btn); });
-      }
-      if (btn.dataset.filterState) {
-        state.tradeFilterState = btn.dataset.filterState;
-        filters.querySelectorAll("[data-filter-state]").forEach(function (b) { b.classList.toggle("is-on", b === btn); });
-      }
+  document.querySelectorAll("#trade-filters button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      tradeFilter = b.getAttribute("data-filter") || "all";
+      document.querySelectorAll("#trade-filters button").forEach(function (x) { x.classList.remove("is-on"); });
+      b.classList.add("is-on");
       renderTrades();
     });
-  }
-  $("ranges") && $("ranges").addEventListener("click", function (e) {
-    const btn = e.target.closest("button[data-range]");
-    if (!btn) return;
-    state.range = btn.dataset.range;
-    $("ranges").querySelectorAll("button").forEach(function (b) { b.classList.toggle("is-on", b === btn); });
-    applyChart(state.chart);
-  });
-  $("sheet-cancel") && $("sheet-cancel").addEventListener("click", function () { $("sheet").hidden = true; });
-  $("confirm-sell") && $("confirm-sell").addEventListener("click", confirmSell);
-  $("sell-pcts") && $("sell-pcts").addEventListener("click", function (e) {
-    const btn = e.target.closest("button[data-pct]");
-    if (!btn) return;
-    state.sellPct = +btn.dataset.pct;
-    $("sell-pcts").querySelectorAll("button").forEach(function (b) { b.classList.toggle("is-on", b === btn); });
-  });
-  $("home-search") && $("home-search").addEventListener("click", function () {
-    $("search-overlay").hidden = false;
-    $("search-input").focus();
-  });
-  $("search-close") && $("search-close").addEventListener("click", function () {
-    $("search-overlay").hidden = true;
   });
 
-  if (window.DeskChart) window.DeskChart.drawEmpty($("chart"));
-  if (dataPath()) {
-    poll();
-    setInterval(poll, POLL_MS);
-  } else {
-    showError();
-    const el = $("error-bar");
-    if (el) { el.hidden = false; el.textContent = "Open this app once with #d= in the URL, then add it to the Home Screen."; }
-  }
-
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("sw.js").catch(function () {});
-  }
+  bindSheet();
+  dropServiceWorker();
+  showScreen("home");
+  refreshUpdated();
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(refreshUpdated, 1000);
+  poll();
+  setInterval(poll, POLL_MS);
 })();

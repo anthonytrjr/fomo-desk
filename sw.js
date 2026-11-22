@@ -1,32 +1,15 @@
-/* Cache the app shell only. Never cache API, /d/ data, or cross-origin
-   (gist) fetches, and never store tokens. */
-const SHELL = "desk-shell-v7";
-const ASSETS = ["./", "index.html", "app.css", "app.js", "chart.js", "manifest.json", "icons/icon-192.png", "icons/apple-touch-icon.png"];
-
+/* v8: drop stale caches and unregister so iOS standalone cannot keep old JS. */
 self.addEventListener("install", function (event) {
-  event.waitUntil(caches.open(SHELL).then(function (cache) { return cache.addAll(ASSETS); }));
   self.skipWaiting();
 });
-
 self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (keys) {
-      return Promise.all(keys.filter(function (k) { return k !== SHELL; }).map(function (k) { return caches.delete(k); }));
-    })
-  );
-  self.clients.claim();
-});
-
-self.addEventListener("fetch", function (event) {
-  const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin) return;
-  if (/\/d(\/|$)/.test(url.pathname) || /\/api(\/|$)/.test(url.pathname)) {
-    return; // network only; do not cache live data
-  }
-  if (event.request.method !== "GET") return;
-  event.respondWith(
-    caches.match(event.request).then(function (hit) {
-      return hit || fetch(event.request);
+      return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+    }).then(function () {
+      return self.clients.claim();
+    }).then(function () {
+      return self.registration.unregister();
     })
   );
 });
