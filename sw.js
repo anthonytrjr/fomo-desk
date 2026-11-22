@@ -1,6 +1,6 @@
 /* Cache the app shell only. Never cache API, /d/ data, or cross-origin
    (gist) fetches, and never store tokens. */
-const SHELL = "desk-shell-v4";
+const SHELL = "desk-shell-v5";
 const ASSETS = ["./", "index.html", "app.css", "app.js", "chart.js", "manifest.json", "icons/icon-192.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", function (event) {

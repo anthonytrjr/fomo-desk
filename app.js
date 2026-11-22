@@ -422,7 +422,7 @@
   }
 
   function poll() {
-    refreshGistMap().catch(function () {}).then(function () { pollReady(); });
+    pollReady();
   }
 
   function pollReady() {
