@@ -2,6 +2,17 @@
   "use strict";
 
   var POLL_MS = 8000;
+  if (!Promise.allSettled) {
+    Promise.allSettled = function (ps) {
+      return Promise.all((ps || []).map(function (p) {
+        return Promise.resolve(p).then(
+          function (v) { return { status: "fulfilled", value: v }; },
+          function (e) { return { status: "rejected", reason: e }; }
+        );
+      }));
+    };
+  }
+
   var CACHE = "desk_data_path";
   var TOKEN_CACHE = "desk_token";
   var state = { data: null, trades: [], activity: [], lastOk: 0, startedLabel: "" };
@@ -44,12 +55,31 @@
     }
   }
 
-  function dataUrl(file) {
+  var skipDirectUntil = 0;
+
+  function candidateUrls(file) {
     var base = (dataPath() || "").replace(/\/+$/, "");
-    if (!base) return "";
     var flat = String(file || "").replace(/^\/+/, "");
-    if (/^https?:\/\//i.test(base)) return base + "/" + flat;
-    return "";
+    var urls = [];
+    if (!base || !flat) return urls;
+    if (!/^https?:\/\//i.test(base)) return urls;
+    var direct = base + "/" + flat;
+    var now = Date.now();
+    if (now >= skipDirectUntil) urls.push(direct);
+    try {
+      var u = new URL(base);
+      if (u.hostname === "gist.githubusercontent.com") {
+        var parts = u.pathname.replace(/^\/+/, "").split("/");
+        if (parts.length >= 2) {
+          var user = parts[0];
+          var id = parts[1];
+          urls.push("https://gistcdn.githack.com/" + user + "/" + id + "/raw/" + flat);
+          urls.push("https://cdn.statically.io/gist/" + user + "/" + id + "/raw/" + flat);
+        }
+      }
+    } catch (e) {}
+    if (now < skipDirectUntil) urls.push(direct);
+    return urls;
   }
 
   function safeReason(err, status) {
@@ -466,16 +496,14 @@
     }
   }
 
-  function fetchJson(file) {
-    var url = dataUrl(file);
-    if (!url) return Promise.resolve(null);
+  function fetchOne(url) {
     var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 8000) : null;
-    var bust = url + (url.indexOf("?") >= 0 ? "&" : "?") + "_t=" + Date.now();
-    return fetch(bust, {
+    return fetch(url, {
       cache: "no-store",
-      signal: ctrl ? ctrl.signal : undefined,
-      headers: { "Accept": "application/json" }
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      signal: ctrl ? ctrl.signal : undefined
     }).then(function (res) {
       if (!res.ok) {
         var err = new Error("http");
@@ -488,29 +516,94 @@
     });
   }
 
+  function fetchJson(file) {
+    var urls = candidateUrls(file);
+    if (!urls.length) return Promise.resolve(null);
+    function attempt(i) {
+      if (i >= urls.length) return Promise.reject(new Error("empty"));
+      return fetchOne(urls[i]).then(function (data) {
+        try {
+          if (i > 0 && urls[0] && /gist\.githubusercontent\.com/.test(urls[0])) {
+            skipDirectUntil = Date.now() + 60000;
+          }
+        } catch (e) {}
+        return data;
+      }).catch(function (err) {
+        if (i + 1 < urls.length) return attempt(i + 1);
+        throw err;
+      });
+    }
+    return attempt(0);
+  }
+
+  function saveLastGood() {
+    try {
+      localStorage.setItem("desk_last_good", JSON.stringify({
+        data: state.data,
+        trades: state.trades,
+        activity: state.activity,
+        lastOk: state.lastOk
+      }));
+    } catch (e) {}
+  }
+
+  function restoreLastGood() {
+    try {
+      var raw = localStorage.getItem("desk_last_good");
+      if (!raw) return false;
+      var snap = JSON.parse(raw);
+      if (!snap || !snap.data) return false;
+      applyState(snap.data);
+      state.trades = snap.trades || [];
+      state.activity = snap.activity || [];
+      state.lastOk = snap.lastOk || 0;
+      renderTrades();
+      renderActivity(state.activity);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function poll() {
     if (!dataPath()) {
       showError("This app is missing its desk link. Open it once from the original #d= link, then add it to the Home Screen again.");
       refreshUpdated();
       return;
     }
-    return Promise.all([
+    return Promise.allSettled([
       fetchJson("state.json"),
       fetchJson("trades.json"),
       fetchJson("activity.json"),
       fetchJson("account.json")
     ]).then(function (parts) {
-      var s = parts[0], t = parts[1], a = parts[2], acc = parts[3];
-      if (!s) throw new Error("empty");
+      var s = parts[0].status === "fulfilled" ? parts[0].value : null;
+      var tr = parts[1].status === "fulfilled" ? parts[1].value : null;
+      var a = parts[2].status === "fulfilled" ? parts[2].value : null;
+      var acc = parts[3].status === "fulfilled" ? parts[3].value : null;
+      if (!s) {
+        var err = parts[0].reason || new Error("empty");
+        if (!state.data && !restoreLastGood()) {
+          showError(safeReason(err, err && err.status));
+        } else {
+          showError("Could not refresh desk data. Showing the last successful load.");
+        }
+        refreshUpdated();
+        return;
+      }
       applyState(s);
-      state.trades = (t && t.rows) || t || [];
-      renderTrades();
-      state.activity = (a && a.rows) || a || [];
-      renderActivity(state.activity);
-      applyAccount(acc);
-    }).catch(function (err) {
-      showError(safeReason(err, err && err.status));
-      refreshUpdated();
+      if (tr) {
+        state.trades = (tr && tr.rows) || tr || [];
+        renderTrades();
+      }
+      if (a) {
+        state.activity = (a && a.rows) || a || [];
+        renderActivity(state.activity);
+      } else if (!state.activity) {
+        renderActivity([]);
+      }
+      if (acc) applyAccount(acc);
+      saveLastGood();
     });
   }
 
